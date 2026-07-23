@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: patinir
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DB_PATH
+        value: ./patinir.db
