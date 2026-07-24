@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "https://esm.sh/react@18.3.1";
-import ReactDOM from "https://esm.sh/react-dom@18.3.1/client";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import ReactDOM from "react-dom/client";
 import {
   MapPin, Star, Plus, Sparkles, ChevronUp, ChevronDown, X,
   Loader2, Share2, Users, RotateCcw, Image as ImageIcon, Flag, Search, MessageSquare, Palette, LogOut,
