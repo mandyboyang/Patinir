@@ -29,7 +29,7 @@ async function apiFetch(path, { method = "GET", body } = {}) {
   return data;
 }
 const api = {
-  register: (name, password, bio) => apiFetch("/api/register", { method: "POST", body: { name, password, bio } }),
+  register: (name, password, bio, accountType, museumSlug) => apiFetch("/api/register", { method: "POST", body: { name, password, bio, accountType, museumSlug } }),
   login: (name, password) => apiFetch("/api/login", { method: "POST", body: { name, password } }),
   getMyData: () => apiFetch("/api/me/data"),
   saveGallery: (gallery) => apiFetch("/api/me/gallery", { method: "PUT", body: { gallery } }),
@@ -37,24 +37,35 @@ const api = {
   saveVisits: (visits) => apiFetch("/api/me/visits", { method: "PUT", body: { visits } }),
   savePrefs: (prefs) => apiFetch("/api/me/prefs", { method: "PUT", body: prefs }),
   resetMyData: () => apiFetch("/api/me/reset", { method: "POST" }),
-  publishCanon: (items, bio) => apiFetch("/api/me/canon/publish", { method: "PUT", body: { items, bio } }),
   getFeed: () => apiFetch("/api/feed"),
   postFeed: (entry) => apiFetch("/api/feed", { method: "POST", body: entry }),
   reportFeed: (id) => apiFetch(`/api/feed/${id}/report`, { method: "POST" }),
   getCommunityMuseums: () => apiFetch("/api/museums/community"),
   addCommunityMuseumApi: (name, city) => apiFetch("/api/museums/community", { method: "POST", body: { name, city } }),
   getDiscover: () => apiFetch("/api/discover"),
+  getProfile: (handle) => apiFetch(`/api/profile/${handle}`),
+  setVisibility: (isPublic) => apiFetch("/api/me/visibility", { method: "PUT", body: { public: isPublic } }),
   getNotes: (slug) => apiFetch(`/api/notes/${slug}`),
   postNote: (slug, text) => apiFetch(`/api/notes/${slug}`, { method: "POST", body: { text } }),
   identifyArtworkApi: (imageBase64) => apiFetch("/api/ai/identify", { method: "POST", body: { imageBase64 } }),
+  guideReflectionApi: (imageBase64) => apiFetch("/api/ai/guide-reflection", { method: "POST", body: { imageBase64 } }),
   locateMuseumApi: (lat, lng) => apiFetch("/api/ai/locate", { method: "POST", body: { lat, lng } }),
   curatorNoteApi: (works) => apiFetch("/api/ai/curator-note", { method: "POST", body: { works } }),
   compareCanonsApi: (mine, theirs) => apiFetch("/api/ai/compare", { method: "POST", body: { mine, theirs } }),
   planVisitApi: (city, knownMuseums) => apiFetch("/api/ai/plan-visit", { method: "POST", body: { city, knownMuseums } }),
+  getMuseumAccounts: () => apiFetch("/api/museums/accounts"),
+  getMuseumProfile: (slug) => apiFetch(`/api/museums/${slug}/profile`),
+  postMuseumPost: (slug, text) => apiFetch(`/api/museums/${slug}/posts`, { method: "POST", body: { text } }),
+  postMuseumPick: (slug, work, artist, note) => apiFetch(`/api/museums/${slug}/picks`, { method: "POST", body: { work, artist, note } }),
+  followMuseum: (slug) => apiFetch(`/api/follow/${slug}`, { method: "POST" }),
+  unfollowMuseum: (slug) => apiFetch(`/api/follow/${slug}`, { method: "DELETE" }),
+  getFollowing: () => apiFetch("/api/me/following"),
+  getMuseumFeed: () => apiFetch("/api/museum-feed"),
 };
 // Thin wrappers so every AI call site elsewhere in this file reads exactly like the
 // artifact version did — only these five functions know they're hitting our server now.
 async function aiIdentifyArtwork(imageDataUrl) { try { return await api.identifyArtworkApi(imageDataUrl.split(",")[1]); } catch (e) { console.error(e); return null; } }
+async function aiGuideReflection(imageDataUrl) { try { return await api.guideReflectionApi(imageDataUrl.split(",")[1]); } catch (e) { console.error(e); return null; } }
 async function aiLocateMuseum(lat, lng) { try { return await api.locateMuseumApi(lat, lng); } catch (e) { console.error(e); return null; } }
 async function aiCuratorNote(canonWorks) { try { return (await api.curatorNoteApi(canonWorks))?.text || null; } catch (e) { console.error(e); return null; } }
 async function aiCompareCanons(mine, theirs) { try { return (await api.compareCanonsApi(mine, theirs))?.text || null; } catch (e) { console.error(e); return null; } }
@@ -299,34 +310,80 @@ function extractExifGPS(file) {
     reader.readAsArrayBuffer(file.slice(0, 131072));
   });
 }
-function extractDominantColors(imageDataUrl, n = 4) {
+function extractDominantColors(imageDataUrl, n = 5) {
   return new Promise((resolve) => {
     const img = new window.Image();
     img.onerror = () => resolve([]);
     img.onload = () => {
       try {
-        const size = 40;
+        const maxSize = 60;
+        const scale = Math.min(maxSize / img.naturalWidth, maxSize / img.naturalHeight) || 1;
+        const w = Math.max(1, Math.round(img.naturalWidth * scale));
+        const h = Math.max(1, Math.round(img.naturalHeight * scale));
         const canvas = document.createElement("canvas");
-        canvas.width = size; canvas.height = size;
+        canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, size, size);
-        const data = ctx.getImageData(0, 0, size, size).data;
-        const buckets = {};
+        ctx.drawImage(img, 0, 0, w, h); // real proportions, not squashed into a square
+        const data = ctx.getImageData(0, 0, w, h).data;
+        const step = 24;
+        const buckets = {}; // color key -> { count, sat }
         for (let i = 0; i < data.length; i += 4) {
-          const r = Math.min(224, Math.round(data[i] / 32) * 32);
-          const g = Math.min(224, Math.round(data[i + 1] / 32) * 32);
-          const b = Math.min(224, Math.round(data[i + 2] / 32) * 32);
+          const r = Math.min(255, Math.round(data[i] / step) * step);
+          const g = Math.min(255, Math.round(data[i + 1] / step) * step);
+          const b = Math.min(255, Math.round(data[i + 2] / step) * step);
+          const max = Math.max(r, g, b), min = Math.min(r, g, b);
+          const sat = max === 0 ? 0 : (max - min) / max;
           const key = `${r},${g},${b}`;
-          buckets[key] = (buckets[key] || 0) + 1;
+          if (!buckets[key]) buckets[key] = { count: 0, sat };
+          buckets[key].count++;
         }
-        const top = Object.entries(buckets).sort((a, b) => b[1] - a[1]).slice(0, n);
-        resolve(top.map(([key]) => "#" + key.split(",").map((v) => Number(v).toString(16).padStart(2, "0")).join("")));
+        const total = data.length / 4;
+        const entries = Object.entries(buckets).map(([key, b]) => ({ key, freq: b.count / total, sat: b.sat }));
+        // Vivid, notable colors first (a red accent beats a grey wall even
+        // though the wall covers more pixels) — dull tones only fill in
+        // afterward, so "what color speaks to you" is never just "the background."
+        const MIN_SAT = 0.15;
+        const vivid = entries.filter((e) => e.sat >= MIN_SAT).sort((a, b) => b.freq * b.sat - a.freq * a.sat);
+        const neutrals = entries.filter((e) => e.sat < MIN_SAT).sort((a, b) => b.freq - a.freq);
+        const result = [...vivid, ...neutrals].slice(0, n);
+        resolve(result.map(({ key }) => "#" + key.split(",").map((v) => Number(v).toString(16).padStart(2, "0")).join("")));
       } catch (e) { resolve([]); }
     };
     img.src = imageDataUrl;
   });
 }
 const EMOTIONS = ["Awe", "Calm", "Melancholy", "Joy", "Longing", "Unease", "Wonder", "Nostalgia"];
+const SUBJECTS = ["Portrait", "Landscape", "Still Life", "Abstract", "Figure", "Interior", "Architecture", "Nature", "Urban", "Mythological/Religious", "Historical Scene"];
+const TRIGGERS = ["Color", "Composition", "Subject/Story", "Light", "Texture/Technique", "Scale/Presence"];
+const SCALES = ["Intimate", "Human-scale", "Monumental"];
+function eraFor(year) {
+  const y = Number(year);
+  if (isNaN(y) || y <= 0) return null;
+  if (y < 500) return "Antiquity";
+  if (y < 1400) return "Medieval";
+  if (y < 1600) return "Renaissance";
+  if (y < 1750) return "Baroque";
+  if (y < 1900) return "18th–19th c.";
+  if (y < 1945) return "Early 20th c.";
+  if (y < 1980) return "Mid-20th c.";
+  return "Contemporary";
+}
+function computeTasteStats(canonWorks) {
+  const mode = (arr) => {
+    if (!arr.length) return null;
+    const counts = {};
+    arr.forEach((v) => { counts[v] = (counts[v] || 0) + 1; });
+    const [value, count] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return { value, count, total: arr.length };
+  };
+  return {
+    topSubject: mode(canonWorks.map((w) => w.subject).filter(Boolean)),
+    topTrigger: mode(canonWorks.map((w) => w.trigger).filter(Boolean)),
+    topScale: mode(canonWorks.map((w) => w.scale).filter(Boolean)),
+    topEra: mode(canonWorks.map((w) => eraFor(w.year)).filter(Boolean)),
+    mineRatio: canonWorks.length ? Math.round((canonWorks.filter((w) => w.mine).length / canonWorks.length) * 100) : 0,
+  };
+}
 
 /* ============================= small UI ============================= */
 function Frame({ palette, imageDataUrl, mine, size = "normal" }) {
@@ -365,9 +422,9 @@ function AccessionCard({ work, canonRank, actions, onOpen }) {
         <Frame palette={work.palette || paletteFor(work.id)} imageDataUrl={work.imageDataUrl} mine={work.mine} />
       </div>
       <div style={{ padding: "10px 12px 12px" }}>
-        <div className="f-mono" style={{ fontSize: 10, color: T.muted, marginBottom: 4 }}>{work.acc} · {work.medium || "Medium unknown"}</div>
+        <div className="f-mono" style={{ fontSize: 10, color: T.muted, marginBottom: 4 }}>{[work.acc, work.medium].filter(Boolean).join(" · ")}</div>
         <div className="f-display" style={{ fontSize: 15, color: T.ink, lineHeight: 1.25 }}>{work.title}</div>
-        <div className="f-body" style={{ fontSize: 12.5, color: T.muted, marginTop: 2 }}>{work.mine ? "Taken by you" : (work.artist || "Unknown artist")} · {work.year || "n.d."}</div>
+        <div className="f-body" style={{ fontSize: 12.5, color: T.muted, marginTop: 2 }}>{[work.mine ? "Taken by you" : work.artist, work.year].filter(Boolean).join(" · ")}</div>
         {(work.emotion || work.pickedColor) && (
           <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 4 }}>
             {work.pickedColor && <span style={{ width: 10, height: 10, borderRadius: "50%", background: work.pickedColor, display: "inline-block", border: `1px solid ${T.hair}` }} />}
@@ -424,6 +481,15 @@ function Stat({ label, value }) {
     <div className="pat-card" style={{ background: T.card, border: `1px solid ${T.hair}`, padding: "16px 16px" }}>
       <div className="f-display" style={{ fontSize: 26, color: T.seal }}>{value}</div>
       <div className="f-mono" style={{ fontSize: 10, color: T.muted, marginTop: 2, letterSpacing: "0.04em" }}>{label.toUpperCase()}</div>
+    </div>
+  );
+}
+function WrappedTile({ label, value, sub, color }) {
+  return (
+    <div className="pat-card" style={{ background: T.card, border: `1px solid ${T.hair}`, borderTop: `3px solid ${color}`, padding: "16px 14px" }}>
+      <div className="f-mono" style={{ fontSize: 8.5, color, marginBottom: 7, letterSpacing: "0.07em" }}>{label}</div>
+      <div className="f-display" style={{ fontSize: 19, color: T.ink, lineHeight: 1.2, marginBottom: 5 }}>{value}</div>
+      <div className="f-mono" style={{ fontSize: 9, color: T.muted }}>{sub}</div>
     </div>
   );
 }
@@ -523,63 +589,120 @@ function NotesPanel({ slug, label, placeholder }) {
   );
 }
 
-function DiscoverCard({ d, myCanonWorks }) {
-  const [open, setOpen] = useState(false);
+function DiscoverCard({ d, onOpen }) {
+  return (
+    <div className="pat-card" onClick={onOpen} style={{ background: T.card, border: `1px solid ${T.hair}`, padding: "16px 16px", cursor: "pointer" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <Users size={14} color={T.moss} />
+        <div className="f-display" style={{ fontSize: 16 }}>{d.name}</div>
+      </div>
+      {d.bio && <div className="f-body" style={{ fontSize: 12.5, color: T.muted, marginBottom: 10 }}>{d.bio}</div>}
+      <div className="f-mono" style={{ fontSize: 9.5, color: T.horizon, letterSpacing: "0.04em" }}>VIEW GALLERY &amp; CANON →</div>
+    </div>
+  );
+}
+
+function ProfileLightbox({ handle, myCanonWorks, onClose }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [view, setView] = useState("canon");
   const [compareText, setCompareText] = useState(null);
   const [compareBusy, setCompareBusy] = useState(false);
-  const slug = "profile-" + (d.handle || slugName(d.name));
+  const slug = "profile-" + handle;
+
+  useEffect(() => {
+    api.getProfile(handle).then(setData).catch((e) => setError(e.message || "Couldn't load this profile."));
+  }, [handle]);
 
   const runCompare = async () => {
     setCompareBusy(true);
-    const text = await aiCompareCanons(myCanonWorks, d.items);
+    const text = await aiCompareCanons(myCanonWorks, data.canon);
     setCompareBusy(false);
     setCompareText(text || "Couldn't reach the AI just now — try again in a moment.");
   };
 
   return (
-    <div className="pat-card" style={{ background: T.card, border: `1px solid ${T.hair}`, padding: "14px 16px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-        <Users size={13} color={T.moss} />
-        <div className="f-display" style={{ fontSize: 15 }}>{d.name}</div>
-      </div>
-      {d.bio && <div className="f-body" style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>{d.bio}</div>}
-      <div style={{ display: "grid", gap: 5 }}>
-        {d.items.slice(0, 5).map((it, idx) => (
-          <div key={idx} className="f-mono" style={{ fontSize: 10.5, color: T.ink, display: "flex", gap: 6 }}>
-            <span style={{ color: T.seal }}>{idx + 1}.</span><span>{it.title} — {it.artist}</span>
+    <ModalShell title={data ? `${data.name}'s profile` : "Loading…"} onClose={onClose}>
+      {error && <div style={{ color: T.seal, fontSize: 12.5 }}>{error}</div>}
+      {!data && !error && <Spinner label="Loading profile…" />}
+      {data && (
+        <>
+          {data.bio && <p className="f-body" style={{ fontSize: 13, color: T.muted, marginTop: -6, marginBottom: 12 }}>{data.bio}</p>}
+          <div className="f-mono" style={{ fontSize: 10, color: T.muted, marginBottom: 14 }}>{data.visitCount} museum{data.visitCount === 1 ? "" : "s"} visited · {data.gallery.length} pieces · {data.canon.length} in canon</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <button onClick={() => setView("canon")} className="f-mono" style={{ flex: 1, padding: "7px 0", fontSize: 10.5, border: `1px solid ${view === "canon" ? T.accent : T.hair}`, background: view === "canon" ? T.accent : "transparent", color: view === "canon" ? "#fff" : T.ink, cursor: "pointer" }}>CANON</button>
+            <button onClick={() => setView("gallery")} className="f-mono" style={{ flex: 1, padding: "7px 0", fontSize: 10.5, border: `1px solid ${view === "gallery" ? T.accent : T.hair}`, background: view === "gallery" ? T.accent : "transparent", color: view === "gallery" ? "#fff" : T.ink, cursor: "pointer" }}>GALLERY</button>
           </div>
-        ))}
-      </div>
-      <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap" }}>
-        <button onClick={() => setOpen((o) => !o)} className="f-mono" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: T.horizon, background: "none", border: "none", cursor: "pointer", padding: 0 }}>
-          <MessageSquare size={12} /> {open ? "HIDE NOTES" : "LEAVE A NOTE"}
-        </button>
-        {myCanonWorks.length > 0 && (
-          <button onClick={runCompare} disabled={compareBusy} className="f-mono" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: T.moss, background: "none", border: "none", cursor: compareBusy ? "default" : "pointer", padding: 0 }}>
-            {compareBusy ? <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} /> : "✦"} COMPARE OUR TASTE
-          </button>
-        )}
-      </div>
-      {compareText && <div style={{ marginTop: 8, fontSize: 12, color: T.ink, background: T.paper, border: `1px dashed ${T.hair}`, padding: "8px 10px" }}>{compareText}</div>}
-      {open && <NotesPanel slug={slug} />}
-    </div>
+          {view === "canon" ? (
+            data.canon.length === 0 ? <EmptyState text="Nothing in their canon yet." /> : (
+              <div style={{ display: "grid", gap: 8, marginBottom: 16 }}>
+                {data.canon.map((w, idx) => (
+                  <div key={w.id} style={{ display: "flex", gap: 10, alignItems: "center", background: T.paper, padding: "8px 10px" }}>
+                    <span className="f-display" style={{ fontSize: 16, color: T.seal, minWidth: 22 }}>{idx + 1}</span>
+                    <div style={{ width: 44, height: 34, flexShrink: 0 }}><Frame palette={w.palette || paletteFor(w.id)} imageDataUrl={w.imageDataUrl} mine={w.mine} size="small" /></div>
+                    <div>
+                      <div className="f-body" style={{ fontSize: 13 }}>{w.title}</div>
+                      <div className="f-mono" style={{ fontSize: 9.5, color: T.muted }}>{[w.mine ? "their photo" : w.artist, w.museum].filter(Boolean).join(" · ")}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : (
+            data.gallery.length === 0 ? <EmptyState text="Nothing in their gallery yet." /> : (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px,1fr))", gap: 10, marginBottom: 16 }}>
+                {data.gallery.map((w) => (
+                  <div key={w.id}>
+                    <Frame palette={w.palette || paletteFor(w.id)} imageDataUrl={w.imageDataUrl} mine={w.mine} size="small" />
+                    <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginTop: 3 }}>{w.title}</div>
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+          {myCanonWorks.length > 0 && data.canon.length > 0 && (
+            <button onClick={runCompare} disabled={compareBusy} className="f-mono" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10.5, color: T.moss, background: "none", border: `1px solid ${T.moss}`, padding: "7px 11px", cursor: compareBusy ? "default" : "pointer", marginBottom: 10 }}>
+              {compareBusy ? <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} /> : "✦"} COMPARE OUR TASTE
+            </button>
+          )}
+          {compareText && <div style={{ marginBottom: 14, fontSize: 12.5, color: T.ink, background: T.paper, border: `1px dashed ${T.hair}`, padding: "9px 11px" }}>{compareText}</div>}
+          <NotesPanel slug={slug} label="LEAVE A NOTE — visible to anyone, like a guestbook" />
+        </>
+      )}
+    </ModalShell>
   );
 }
 
 /* ============================= auth (register / sign in — a real account now) ============================= */
 function Auth({ onDone }) {
   const [mode, setMode] = useState("register");
+  const [accountType, setAccountType] = useState("personal");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [bio, setBio] = useState("");
+  const [museumQuery, setMuseumQuery] = useState("");
+  const [pickedMuseum, setPickedMuseum] = useState(null);
+  const [communityMuseums, setCommunityMuseums] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    if (accountType === "museum" && communityMuseums.length === 0) {
+      api.getCommunityMuseums().then(setCommunityMuseums).catch(() => {});
+    }
+  }, [accountType]);
+
+  const combined = useMemo(() => mergeMuseumLists(communityMuseums), [communityMuseums]);
+  const q = museumQuery.trim().toLowerCase();
+  const matches = q ? combined.filter((m) => (m.name + " " + m.city).toLowerCase().includes(q)).slice(0, 6) : [];
+
   const submit = async () => {
     if (!name.trim() || !password) return;
+    if (mode === "register" && accountType === "museum" && !pickedMuseum) { setError("Pick which museum you're claiming from the list."); return; }
     setSaving(true); setError("");
+    const slug = pickedMuseum ? "museum-" + slugName(pickedMuseum.name + "-" + pickedMuseum.city) : null;
     try {
-      const result = mode === "register" ? await api.register(name.trim(), password, bio.trim()) : await api.login(name.trim(), password);
+      const result = mode === "register" ? await api.register(name.trim(), password, bio.trim(), accountType, slug) : await api.login(name.trim(), password);
       setToken(result.token);
       onDone(result.user);
     } catch (e) {
@@ -608,19 +731,50 @@ function Auth({ onDone }) {
           <button onClick={() => { setMode("register"); setError(""); }} className="f-mono" style={{ flex: 1, padding: "8px 0", fontSize: 11, letterSpacing: "0.05em", border: `1px solid ${mode === "register" ? T.accent : T.hair}`, background: mode === "register" ? T.accent : "transparent", color: mode === "register" ? "#fff" : T.ink, cursor: "pointer" }}>NEW ACCOUNT</button>
           <button onClick={() => { setMode("login"); setError(""); }} className="f-mono" style={{ flex: 1, padding: "8px 0", fontSize: 11, letterSpacing: "0.05em", border: `1px solid ${mode === "login" ? T.accent : T.hair}`, background: mode === "login" ? T.accent : "transparent", color: mode === "login" ? "#fff" : T.ink, cursor: "pointer" }}>SIGN IN</button>
         </div>
+        {mode === "register" && (
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <button onClick={() => setAccountType("personal")} className="f-mono" style={{ flex: 1, padding: "7px 0", fontSize: 10.5, border: `1.5px solid ${accountType === "personal" ? T.moss : T.hair}`, background: "transparent", color: T.ink, cursor: "pointer" }}>A PERSON</button>
+            <button onClick={() => setAccountType("museum")} className="f-mono" style={{ flex: 1, padding: "7px 0", fontSize: 10.5, border: `1.5px solid ${accountType === "museum" ? T.moss : T.hair}`, background: "transparent", color: T.ink, cursor: "pointer" }}>A MUSEUM, CLAIMING OUR PAGE</button>
+          </div>
+        )}
         <div style={{ display: "grid", gap: 12 }}>
           <div>
-            <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>YOUR NAME</label>
-            <input style={inputStyleBase} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Priya" />
+            <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>{accountType === "museum" ? "STAFF ACCOUNT NAME" : "YOUR NAME"}</label>
+            <input style={inputStyleBase} value={name} onChange={(e) => setName(e.target.value)} placeholder={accountType === "museum" ? "e.g. Frick Wing Team" : "e.g. Priya"} />
           </div>
           <div>
             <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>PASSWORD {mode === "register" && "(6+ CHARACTERS)"}</label>
             <input type="password" style={inputStyleBase} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" onKeyDown={(e) => e.key === "Enter" && submit()} />
           </div>
-          {mode === "register" && (
+          {mode === "register" && accountType === "personal" && (
             <div>
               <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>ONE LINE ABOUT YOUR TASTE (OPTIONAL)</label>
               <input style={inputStyleBase} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="e.g. Drawn to quiet interiors and charcoal" />
+            </div>
+          )}
+          {mode === "register" && accountType === "museum" && (
+            <div>
+              <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>WHICH MUSEUM ARE YOU CLAIMING?</label>
+              {pickedMuseum ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: `1px solid ${T.moss}`, padding: "9px 11px" }}>
+                  <span style={{ fontSize: 13 }}>{pickedMuseum.name} <span style={{ color: T.muted }}>· {pickedMuseum.city}</span></span>
+                  <button onClick={() => setPickedMuseum(null)} style={{ background: "none", border: "none", cursor: "pointer", color: T.muted }}><X size={14} /></button>
+                </div>
+              ) : (
+                <div style={{ position: "relative" }}>
+                  <input style={inputStyleBase} value={museumQuery} onChange={(e) => setMuseumQuery(e.target.value)} placeholder="Search by museum or city…" />
+                  {matches.length > 0 && (
+                    <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#fff", border: `1px solid ${T.hair}`, zIndex: 30, maxHeight: 180, overflowY: "auto" }}>
+                      {matches.map((m, i) => (
+                        <button key={i} onClick={() => { setPickedMuseum(m); setMuseumQuery(""); }} className="f-body" style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 10px", background: "none", border: "none", borderBottom: `1px solid ${T.hair}`, cursor: "pointer", fontSize: 12.5 }}>
+                          {m.name} <span style={{ color: T.muted }}>· {m.city}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginTop: 4 }}>Don't see it? Log a visit there as a person first (from the Museums tab) to add it, then come back and register as the museum.</div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -643,6 +797,12 @@ function App() {
   const [works, setWorks] = useState([]);
   const [canon, setCanon] = useState([]);
   const [communityMuseums, setCommunityMuseums] = useState([]);
+  const [following, setFollowing] = useState(new Set());
+  const toggleFollow = async (slug) => {
+    const isFollowing = following.has(slug);
+    setFollowing((prev) => { const next = new Set(prev); isFollowing ? next.delete(slug) : next.add(slug); return next; });
+    try { isFollowing ? await api.unfollowMuseum(slug) : await api.followMuseum(slug); } catch (e) { console.error(e); }
+  };
 
   const [feed, setFeed] = useState(null);
   const [feedLoading, setFeedLoading] = useState(false);
@@ -652,9 +812,11 @@ function App() {
 
   const [showLogForm, setShowLogForm] = useState(false);
   const [showWorkForm, setShowWorkForm] = useState(false);
-  const [publishing, setPublishing] = useState(false);
-  const [published, setPublished] = useState(false);
+  const [showReflect, setShowReflect] = useState(false);
+  const [visibilityBusy, setVisibilityBusy] = useState(false);
   const [lightbox, setLightbox] = useState(null);
+  const [editingWork, setEditingWork] = useState(null);
+  const [openCanon, setOpenCanon] = useState(null);
   const [theme, setTheme] = useState("patinir");
   const [wallStyle, setWallStyle] = useState("plain");
   const [showThemePanel, setShowThemePanel] = useState(false);
@@ -666,11 +828,14 @@ function App() {
     try {
       const data = await api.getMyData();
       setProfile(data.profile);
+      setTab(data.profile.accountType === "museum" ? "mymuseum" : "gallery");
       setVisits(data.visits || []); setWorks(data.gallery || []); setCanon(data.canon || []);
       if (THEMES[data.uiTheme]) setTheme(data.uiTheme);
       if (WALL_STYLES[data.galleryWall]) setWallStyle(data.galleryWall);
       const cm = await api.getCommunityMuseums().catch(() => []);
       setCommunityMuseums(cm || []);
+      const fw = await api.getFollowing().catch(() => []);
+      setFollowing(new Set(fw || []));
       setPhase("ready");
     } catch (e) {
       setToken(null);
@@ -685,12 +850,22 @@ function App() {
 
   const loadFeed = useCallback(async () => { setFeedLoading(true); try { setFeed(await api.getFeed()); } catch (e) { setFeed([]); } setFeedLoading(false); }, []);
   const loadDiscover = useCallback(async () => { setDiscoverLoading(true); try { setDiscover(await api.getDiscover()); } catch (e) { setDiscover([]); } setDiscoverLoading(false); }, []);
+  const [museumFeed, setMuseumFeed] = useState(null);
+  const [museumFeedLoading, setMuseumFeedLoading] = useState(false);
+  const loadMuseumFeed = useCallback(async () => { setMuseumFeedLoading(true); try { setMuseumFeed(await api.getMuseumFeed()); } catch (e) { setMuseumFeed([]); } setMuseumFeedLoading(false); }, []);
+  const [myMuseumProfile, setMyMuseumProfile] = useState(null);
+  const loadMyMuseumProfile = useCallback(async () => {
+    if (!profile?.museumSlug) return;
+    try { setMyMuseumProfile(await api.getMuseumProfile(profile.museumSlug)); } catch (e) { setMyMuseumProfile(null); }
+  }, [profile]);
 
   useEffect(() => {
     if (phase !== "ready") return;
     if (tab === "feed" && feed === null) loadFeed();
     if (tab === "discover" && discover === null) loadDiscover();
-  }, [tab, phase, feed, discover, loadFeed, loadDiscover]);
+    if (tab === "museumfeed" && museumFeed === null) loadMuseumFeed();
+    if (tab === "mymuseum") loadMyMuseumProfile();
+  }, [tab, phase, feed, discover, museumFeed, loadFeed, loadDiscover, loadMuseumFeed, loadMyMuseumProfile]);
 
   const workById = useMemo(() => Object.fromEntries(works.map((w) => [w.id, w])), [works]);
 
@@ -709,11 +884,17 @@ function App() {
     if (shareToFeed) {
       try {
         await api.postFeed({ museum: v.museum, exhibit: v.exhibit, rating: v.rating, note: v.note, date: v.date });
-        setFeed((prev) => prev === null ? null : [{ id: "local-" + v.id, author_name: profile.name, museum: v.museum, exhibit: v.exhibit, rating: v.rating, note: v.note, date: v.date, report_count: 0 }, ...prev]);
+        setFeed((prev) => prev === null ? null : [{ id: "local-" + v.id, author_name: profile.name, kind: "visit", museum: v.museum, exhibit: v.exhibit, rating: v.rating, note: v.note, date: v.date, report_count: 0 }, ...prev]);
       } catch (e) { console.error(e); }
     }
   };
   const addWork = async (w) => saveWorks([w, ...works]);
+  const updateWork = async (updated) => { await saveWorks(works.map((w) => (w.id === updated.id ? updated : w))); setEditingWork(null); };
+  const deleteWork = async (id) => {
+    await saveWorks(works.filter((w) => w.id !== id));
+    if (canon.includes(id)) await saveCanon(canon.filter((cid) => cid !== id));
+    setEditingWork(null);
+  };
 
   const toggleCanon = async (id) => { setPublished(false); await saveCanon(canon.includes(id) ? canon.filter((x) => x !== id) : [...canon, id]); };
   const moveCanon = async (id, dir) => {
@@ -722,11 +903,15 @@ function App() {
     const copy = [...canon]; [copy[i], copy[j]] = [copy[j], copy[i]];
     setPublished(false); await saveCanon(copy);
   };
-  const publishCanon = async () => {
-    setPublishing(true);
-    const items = canon.map((id) => workById[id]).filter(Boolean).slice(0, 12).map((w) => ({ title: w.title, artist: w.mine ? "you" : w.artist, museum: w.museum }));
-    try { await api.publishCanon(items, profile.bio); setPublished(true); setDiscover(null); } catch (e) { console.error(e); }
-    setPublishing(false);
+  const toggleProfileVisibility = async () => {
+    setVisibilityBusy(true);
+    const next = !profile.profilePublic;
+    try {
+      await api.setVisibility(next);
+      setProfile((p) => ({ ...p, profilePublic: next }));
+      setDiscover(null);
+    } catch (e) { console.error(e); }
+    setVisibilityBusy(false);
   };
   const reportFeedItem = async (id) => {
     if (reportedIds.has(id)) return;
@@ -753,6 +938,7 @@ function App() {
 
   const myCanonWorks = useMemo(() => canon.map((id) => workById[id]).filter(Boolean), [canon, workById]);
   const myPalette = useMemo(() => myCanonWorks.map((w) => w.pickedColor || (w.colors && w.colors[0])).filter(Boolean), [myCanonWorks]);
+  const tasteStats = useMemo(() => computeTasteStats(myCanonWorks), [myCanonWorks]);
   const canonSignature = useMemo(() => myCanonWorks.map((w) => w.id).join("|"), [myCanonWorks]);
   const [curatorNote, setCuratorNote] = useState(null);
   const [curatorLoading, setCuratorLoading] = useState(false);
@@ -772,10 +958,14 @@ function App() {
     if (tab === "taste" && curatorSig !== canonSignature) generateCuratorNote(false);
   }, [tab, phase, canonSignature, curatorSig, generateCuratorNote]);
 
-  const NAV = [
+  const isMuseumAccount = profile?.accountType === "museum";
+  const NAV = isMuseumAccount ? [
+    { id: "mymuseum", label: "My Museum" }, { id: "museums", label: "Museums" },
+    { id: "feed", label: "Feed" }, { id: "discover", label: "Discover" },
+  ] : [
     { id: "gallery", label: "My Gallery" }, { id: "canon", label: "My Canon" },
-    { id: "museums", label: "Museums" }, { id: "feed", label: "Feed" },
-    { id: "discover", label: "Discover" }, { id: "taste", label: "Taste" },
+    { id: "museums", label: "Museums" }, { id: "museumfeed", label: "Museum Feed" },
+    { id: "feed", label: "Feed" }, { id: "discover", label: "Discover" }, { id: "taste", label: "Taste" },
   ];
 
   if (phase === "loading") return <div className="f-body" style={{ minHeight: "100vh", background: T.paper, display: "flex", alignItems: "center", justifyContent: "center" }}>{FONTS}<Spinner label="Opening the gallery…" /></div>;
@@ -798,9 +988,16 @@ function App() {
               <button onClick={() => setShowThemePanel((s) => !s)} title="Customize appearance" className="f-mono" style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 6, background: showThemePanel ? T.accent : "transparent", color: showThemePanel ? "#fff" : T.ink, border: `1px solid ${showThemePanel ? T.accent : T.hair}`, padding: "8px 10px", cursor: "pointer" }}>
                 <Palette size={13} />
               </button>
-              <button onClick={() => setShowLogForm(true)} className="f-mono" style={{ fontSize: 11, letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: 6, background: T.accent, color: "#fff", border: "none", padding: "8px 12px", cursor: "pointer" }}>
-                <Plus size={13} /> LOG A VISIT
-              </button>
+              {!isMuseumAccount && (
+                <button onClick={() => setShowReflect(true)} className="f-mono" style={{ fontSize: 11, letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: 6, background: T.horizon, color: "#fff", border: "none", padding: "8px 12px", cursor: "pointer" }}>
+                  <Sparkles size={13} /> SEE A PIECE
+                </button>
+              )}
+              {!isMuseumAccount && (
+                <button onClick={() => setShowLogForm(true)} className="f-mono" style={{ fontSize: 11, letterSpacing: "0.05em", display: "flex", alignItems: "center", gap: 6, background: T.accent, color: "#fff", border: "none", padding: "8px 12px", cursor: "pointer" }}>
+                  <Plus size={13} /> LOG A VISIT
+                </button>
+              )}
               <button onClick={signOut} title="Sign out" className="f-mono" style={{ fontSize: 11, display: "flex", alignItems: "center", background: "transparent", color: T.muted, border: `1px solid ${T.hair}`, padding: "8px 10px", cursor: "pointer" }}>
                 <LogOut size={13} />
               </button>
@@ -867,12 +1064,9 @@ function App() {
           <>
             <SectionHeader eyebrow="RANKED, NOT LISTED" title="My Canon" blurb="The pieces you'd defend. Order matters — reorder to say which comes first."
               right={canon.length > 0 && (
-                <SmallButton onClick={publishCanon} disabled={publishing} active={published}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                    {publishing ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <Share2 size={12} />}
-                    {published ? "PUBLISHED TO DISCOVER" : "PUBLISH TO DISCOVER"}
-                  </span>
-                </SmallButton>
+                <div className="f-mono" style={{ fontSize: 10, color: T.muted }}>
+                  {profile.profilePublic ? <span style={{ color: T.moss }}>● Visible on your public profile</span> : <span>Private — turn on in the Taste tab to let people see this</span>}
+                </div>
               )} />
             {canon.length === 0 ? <EmptyState text={'Nothing in your canon yet. Go to My Gallery and mark a piece "add to canon."'} /> : (
               <div style={{ display: "grid", gap: 10 }}>
@@ -884,7 +1078,7 @@ function App() {
                       <div style={{ width: 56, height: 42, flexShrink: 0 }}><Frame palette={w.palette || paletteFor(w.id)} imageDataUrl={w.imageDataUrl} mine={w.mine} size="small" /></div>
                       <div style={{ flex: 1, minWidth: 140 }}>
                         <div className="f-body" style={{ fontSize: 13.5 }}>{w.title}</div>
-                        <div className="f-mono" style={{ fontSize: 10, color: T.muted }}>{w.mine ? "you" : (w.artist || "Unknown")} · {w.museum || "—"}</div>
+                        <div className="f-mono" style={{ fontSize: 10, color: T.muted }}>{[w.mine ? "you" : w.artist, w.museum].filter(Boolean).join(" · ")}</div>
                       </div>
                       <div style={{ display: "flex", gap: 4 }}>
                         <button onClick={() => moveCanon(id, -1)} style={{ border: `1px solid ${T.hair}`, background: "none", cursor: "pointer", padding: 4 }}><ChevronUp size={14} /></button>
@@ -899,13 +1093,35 @@ function App() {
           </>
         )}
 
-        {tab === "museums" && <MuseumsTab communityMuseums={communityMuseums} onAddCommunity={addCommunityMuseum} />}
+        {tab === "museums" && <MuseumsTab communityMuseums={communityMuseums} onAddCommunity={addCommunityMuseum} following={following} onToggleFollow={toggleFollow} />}
+
+        {tab === "museumfeed" && (
+          <>
+            <SectionHeader eyebrow="ANNOUNCEMENTS" title="Museum Feed" blurb="Updates from museums you follow — new exhibits, hours, anything they choose to post. Follow a museum from the Museums tab." />
+            {museumFeedLoading && museumFeed === null ? <Spinner label="Loading…" /> : !museumFeed || museumFeed.length === 0 ? (
+              <EmptyState text="Nothing yet — follow a museum from the Museums tab to see their posts here." />
+            ) : (
+              <div style={{ display: "grid", gap: 12 }}>
+                {museumFeed.map((p) => (
+                  <div key={p.id} className="pat-card" style={{ background: T.card, border: `1px solid ${T.hair}`, padding: "14px 16px" }}>
+                    <div className="f-mono" style={{ fontSize: 10, color: T.accent, marginBottom: 5 }}>{p.museum_name}</div>
+                    <p style={{ fontSize: 13.5, color: T.ink }}>{p.text}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {tab === "mymuseum" && (
+          <MyMuseumTab profile={profile} data={myMuseumProfile} onPosted={loadMyMuseumProfile} />
+        )}
 
         {tab === "feed" && (
           <>
-            <SectionHeader eyebrow="LIVE, SHARED" title="Feed" blurb="Visits logged by everyone using Patinir right now — shared the moment someone chooses to post." />
+            <SectionHeader eyebrow="LIVE, SHARED" title="Feed" blurb="Visits and pieces people choose to share — shared the moment they say yes, nothing automatic." />
             {feedLoading && feed === null ? <Spinner label="Loading the feed…" /> : visibleFeed.length === 0 ? (
-              <EmptyState text="No one's shared a visit yet. Log one and check 'share to feed' to be the first." />
+              <EmptyState text="Nothing shared yet. Log a visit or add a piece and check 'share to feed' to be the first." />
             ) : (
               <div style={{ display: "grid", gap: 14 }}>
                 {visibleFeed.map((v) => (
@@ -913,15 +1129,35 @@ function App() {
                     <button onClick={() => reportFeedItem(v.id)} disabled={reportedIds.has(v.id)} title="Report this post" style={{ position: "absolute", top: 10, right: 10, background: "none", border: "none", cursor: reportedIds.has(v.id) ? "default" : "pointer", color: reportedIds.has(v.id) ? T.seal : T.hair }}>
                       <Flag size={13} />
                     </button>
-                    <div style={{ flex: "0 0 100px" }}>
-                      <div className="f-mono" style={{ fontSize: 10, color: T.muted }}>{v.date}</div>
-                      <Stars value={v.rating} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 200 }}>
-                      <div className="f-display" style={{ fontSize: 16 }}>{v.museum}</div>
-                      <div className="f-mono" style={{ fontSize: 10.5, color: T.accent, margin: "3px 0 6px" }}>{v.exhibit} · <span style={{ color: T.muted }}>by {v.author_name || v.authorName}</span></div>
-                      {v.note && <p style={{ fontSize: 13, opacity: 0.85 }}>{v.note}</p>}
-                    </div>
+                    {v.kind === "piece" ? (
+                      <>
+                        {(v.image_data_url || v.imageDataUrl) && (
+                          <div style={{ flex: "0 0 90px", height: 90, overflow: "hidden", border: `1px solid ${T.hair}` }}>
+                            <img src={v.image_data_url || v.imageDataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          </div>
+                        )}
+                        <div style={{ flex: 1, minWidth: 200 }}>
+                          <div className="f-mono" style={{ fontSize: 9, color: T.horizon, marginBottom: 3, letterSpacing: "0.05em" }}>ADDED TO A GALLERY</div>
+                          <div className="f-display" style={{ fontSize: 16 }}>{v.title}</div>
+                          <div className="f-mono" style={{ fontSize: 10.5, color: T.accent, margin: "3px 0 6px" }}>
+                            {v.artist || v.medium || ""}{v.subject ? ` · ${v.subject}` : ""} · <span style={{ color: T.muted }}>by {v.author_name || v.authorName}</span>
+                          </div>
+                          {v.museum && <div className="f-mono" style={{ fontSize: 10, color: T.muted, display: "flex", alignItems: "center", gap: 4 }}><MapPin size={10} /> {v.museum}</div>}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ flex: "0 0 100px" }}>
+                          <div className="f-mono" style={{ fontSize: 10, color: T.muted }}>{v.date}</div>
+                          <Stars value={v.rating} />
+                        </div>
+                        <div style={{ flex: 1, minWidth: 200 }}>
+                          <div className="f-display" style={{ fontSize: 16 }}>{v.museum}</div>
+                          <div className="f-mono" style={{ fontSize: 10.5, color: T.accent, margin: "3px 0 6px" }}>{v.exhibit} · <span style={{ color: T.muted }}>by {v.author_name || v.authorName}</span></div>
+                          {v.note && <p style={{ fontSize: 13, opacity: 0.85 }}>{v.note}</p>}
+                        </div>
+                      </>
+                    )}
                   </div>
                 ))}
               </div>
@@ -931,12 +1167,12 @@ function App() {
 
         {tab === "discover" && (
           <>
-            <SectionHeader eyebrow="OTHER PEOPLE'S CANONS" title="Discover" blurb="Anyone who's published their canon shows up here. Publish yours, then use AI to compare what you're drawn to against anyone else's." />
+            <SectionHeader eyebrow="REAL PROFILES, LIVE" title="Discover" blurb="Anyone with a public profile shows up here — click in to see their actual gallery and canon, not a snapshot. Turn yours on from the Taste tab." />
             {discoverLoading && discover === null ? <Spinner label="Loading canons…" /> : !discover || discover.length === 0 ? (
-              <EmptyState text="No one's published a canon yet. Build yours in the Canon tab and publish it." />
+              <EmptyState text="No one's made their profile public yet. Turn yours on in the Taste tab." />
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 14 }}>
-                {discover.map((d) => <DiscoverCard key={d.handle + d.updatedAt} d={d} myCanonWorks={myCanonWorks} />)}
+                {discover.map((d) => <DiscoverCard key={d.handle} d={d} onOpen={() => setOpenCanon(d)} />)}
               </div>
             )}
           </>
@@ -945,6 +1181,21 @@ function App() {
         {tab === "taste" && (
           <>
             <SectionHeader eyebrow="AN IDENTITY, LIKE ANY OTHER" title="Your taste" />
+            {myCanonWorks.length > 0 && (
+              <div style={{ marginBottom: 22 }}>
+                <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 8, letterSpacing: "0.05em" }}>YOUR CANON, BY THE NUMBERS</div>
+                {(tasteStats.topSubject || tasteStats.topEra || tasteStats.topTrigger || tasteStats.topScale) ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px,1fr))", gap: 12 }}>
+                    {tasteStats.topSubject && <WrappedTile label="TOP SUBJECT" value={tasteStats.topSubject.value} sub={`${tasteStats.topSubject.count} of ${tasteStats.topSubject.total} tagged pieces`} color={T.moss} />}
+                    {tasteStats.topEra && <WrappedTile label="YOUR ERA" value={tasteStats.topEra.value} sub={`${tasteStats.topEra.count} of ${tasteStats.topEra.total} dated pieces`} color={T.accent} />}
+                    {tasteStats.topTrigger && <WrappedTile label="WHAT PULLS YOU IN" value={tasteStats.topTrigger.value} sub={`${tasteStats.topTrigger.count} of ${tasteStats.topTrigger.total} tagged pieces`} color={T.horizon} />}
+                    {tasteStats.topScale && <WrappedTile label="YOUR SCALE" value={tasteStats.topScale.value} sub={`${tasteStats.topScale.count} of ${tasteStats.topScale.total} tagged pieces`} color={T.seal} />}
+                  </div>
+                ) : (
+                  <div className="f-mono" style={{ fontSize: 10, color: T.muted }}>Tag subject, trigger, and scale on a few pieces (in Edit) and real numbers show up here.</div>
+                )}
+              </div>
+            )}
             {myPalette.length > 0 && (
               <div style={{ marginBottom: 14 }}>
                 <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 6, letterSpacing: "0.05em" }}>YOUR PALETTE, ACROSS YOUR CANON</div>
@@ -981,9 +1232,19 @@ function App() {
               <p className="f-body" style={{ fontSize: 12, color: T.muted, lineHeight: 1.6, marginBottom: 14 }}>
                 Named for Joachim Patinir, the Flemish painter often credited as the first to make landscape itself
                 the subject of a painting rather than a backdrop for figures — Dürer called him "the good landscape
-                painter." This is a real, independently hosted website with its own database — nothing here runs
-                through Claude.ai anymore.
+                painter."
               </p>
+              <div style={{ background: T.paper, border: `1px solid ${T.hair}`, padding: "14px 16px", marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
+                  <div className="f-mono" style={{ fontSize: 11, color: T.ink, letterSpacing: "0.03em" }}>MAKE MY PROFILE PUBLIC</div>
+                  <button onClick={toggleProfileVisibility} disabled={visibilityBusy} className="f-mono" style={{ fontSize: 10.5, padding: "6px 12px", border: `1px solid ${profile.profilePublic ? T.moss : T.hair}`, background: profile.profilePublic ? T.moss : "transparent", color: profile.profilePublic ? "#fff" : T.ink, cursor: visibilityBusy ? "default" : "pointer" }}>
+                    {visibilityBusy ? "…" : profile.profilePublic ? "ON — ANYONE CAN VIEW IT" : "OFF — PRIVATE"}
+                  </button>
+                </div>
+                <p className="f-body" style={{ fontSize: 12, color: T.muted, lineHeight: 1.5 }}>
+                  When on, anyone can find you in Discover and see your <strong>Gallery</strong> (with your real photos) and your ranked <strong>Canon</strong> — live, not a snapshot, so it's always current. <strong>What this means to you</strong> and your reflection notes never show, on or off, no matter what — those stay yours regardless of this setting.
+                </p>
+              </div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
                 <div className="f-mono" style={{ fontSize: 10.5, color: T.muted }}>Signed in as {profile.name}.</div>
                 <button onClick={resetMyData} className="f-mono" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10.5, color: T.seal, background: "none", border: `1px solid ${T.seal}`, padding: "6px 10px", cursor: "pointer" }}>
@@ -997,7 +1258,10 @@ function App() {
 
       {showLogForm && <LogVisitModal communityMuseums={communityMuseums} onAddCommunity={addCommunityMuseum} onClose={() => setShowLogForm(false)} onSave={async (v, share) => { await addVisit(v, share); setShowLogForm(false); }} />}
       {showWorkForm && <AddWorkModal communityMuseums={communityMuseums} onAddCommunity={addCommunityMuseum} onClose={() => setShowWorkForm(false)} onSave={async (w) => { await addWork(w); setShowWorkForm(false); }} />}
-      {lightbox && <Lightbox work={lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && <Lightbox work={lightbox} onClose={() => setLightbox(null)} onEdit={(w) => { setLightbox(null); setEditingWork(w); }} />}
+      {editingWork && <EditWorkModal work={editingWork} onClose={() => setEditingWork(null)} onSave={updateWork} onDelete={deleteWork} communityMuseums={communityMuseums} onAddCommunity={addCommunityMuseum} />}
+      {showReflect && <ReflectModal onClose={() => setShowReflect(false)} onSaveToGallery={addWork} />}
+      {openCanon && <ProfileLightbox handle={openCanon.handle} myCanonWorks={myCanonWorks} onClose={() => setOpenCanon(null)} />}
     </div>
   );
 }
@@ -1052,15 +1316,30 @@ function PlanVisit({ combined }) {
   );
 }
 
-function MuseumRow({ m }) {
+function MuseumRow({ m, museumAccounts, following, onToggleFollow }) {
   const [open, setOpen] = useState(false);
+  const [official, setOfficial] = useState(null);
   const mustSees = MUST_SEES[m.name] || [];
-  const tipsSlug = "museum-" + slugName(m.name + "-" + m.city);
+  const slug = "museum-" + slugName(m.name + "-" + m.city);
+  const claimedAccount = museumAccounts.find((a) => a.museum_slug === slug);
+  const isFollowing = following.has(slug);
+
+  useEffect(() => {
+    if (open && claimedAccount && !official) {
+      api.getMuseumProfile(slug).then(setOfficial).catch(() => {});
+    }
+  }, [open, claimedAccount, slug, official]);
+
+  const picksToShow = official?.picks?.length ? official.picks : mustSees;
+
   return (
     <div className="pat-card" style={{ background: T.card, border: `1px solid ${T.hair}`, padding: "9px 12px" }}>
       <button onClick={() => setOpen((o) => !o)} style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "none", border: "none", cursor: "pointer", padding: 0, textAlign: "left" }}>
         <div>
-          <div className="f-body" style={{ fontSize: 13 }}>{m.name}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div className="f-body" style={{ fontSize: 13 }}>{m.name}</div>
+            {claimedAccount && <span className="f-mono" style={{ fontSize: 8, color: T.accent, border: `1px solid ${T.accent}`, padding: "1px 5px" }}>OFFICIAL</span>}
+          </div>
           <div className="f-mono" style={{ fontSize: 10, color: T.muted, display: "flex", alignItems: "center", gap: 4 }}><MapPin size={10} /> {m.city}</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1070,24 +1349,105 @@ function MuseumRow({ m }) {
       </button>
       {open && (
         <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${T.hair}` }}>
-          {mustSees.length > 0 && (
+          {claimedAccount && (
+            <button onClick={() => onToggleFollow(slug)} className="f-mono" style={{ fontSize: 10, padding: "5px 10px", marginBottom: 10, border: `1px solid ${isFollowing ? T.accent : T.hair}`, background: isFollowing ? T.accent : "transparent", color: isFollowing ? "#fff" : T.ink, cursor: "pointer" }}>
+              {isFollowing ? "FOLLOWING" : "FOLLOW"}
+            </button>
+          )}
+          {official?.posts?.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="f-mono" style={{ fontSize: 9, color: T.accent, marginBottom: 5 }}>FROM THE MUSEUM</div>
+              <div style={{ display: "grid", gap: 5 }}>
+                {official.posts.slice(0, 3).map((p) => <div key={p.id} style={{ fontSize: 12, color: T.ink, background: T.paper, padding: "6px 8px" }}>{p.text}</div>)}
+              </div>
+            </div>
+          )}
+          {picksToShow.length > 0 && (
             <div style={{ display: "grid", gap: 4, marginBottom: 10 }}>
-              {mustSees.map((ms, idx) => (
+              <div className="f-mono" style={{ fontSize: 9, color: T.muted }}>{official?.picks?.length ? "OFFICIAL PICKS" : "MUST-SEES"}</div>
+              {picksToShow.map((ms, idx) => (
                 <div key={idx} className="f-mono" style={{ fontSize: 10.5, color: T.ink }}>
                   <span style={{ color: T.seal }}>✦</span> {ms.work} <span style={{ color: T.muted }}>— {ms.artist}</span>
                 </div>
               ))}
             </div>
           )}
-          <NotesPanel slug={tipsSlug} label="LOCALS & VISITORS RECOMMEND — tips from people who've actually been" placeholder="e.g. go weekday mornings, the top floor gets busy…" />
+          <NotesPanel slug={slug} label="LOCALS & VISITORS RECOMMEND — tips from people who've actually been" placeholder="e.g. go weekday mornings, the top floor gets busy…" />
         </div>
       )}
     </div>
   );
 }
 
-function MuseumsTab({ communityMuseums, onAddCommunity }) {
+function MyMuseumTab({ profile, data, onPosted }) {
+  const [postText, setPostText] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [pickWork, setPickWork] = useState("");
+  const [pickArtist, setPickArtist] = useState("");
+  const [pickNote, setPickNote] = useState("");
+  const [pickBusy, setPickBusy] = useState(false);
+
+  const submitPost = async () => {
+    if (!postText.trim()) return;
+    setPosting(true);
+    try { await api.postMuseumPost(profile.museumSlug, postText.trim()); setPostText(""); onPosted(); } catch (e) { console.error(e); }
+    setPosting(false);
+  };
+  const submitPick = async () => {
+    if (!pickWork.trim()) return;
+    setPickBusy(true);
+    try { await api.postMuseumPick(profile.museumSlug, pickWork.trim(), pickArtist.trim(), pickNote.trim()); setPickWork(""); setPickArtist(""); setPickNote(""); onPosted(); } catch (e) { console.error(e); }
+    setPickBusy(false);
+  };
+
+  return (
+    <>
+      <SectionHeader eyebrow="OFFICIAL ACCOUNT" title="My Museum" blurb={`Managing ${profile.name}. Posts and picks here show up publicly on your museum's entry to everyone, including people who haven't followed you yet.`} />
+      <div style={{ marginBottom: 30 }}>
+        <div className="f-mono" style={{ fontSize: 10.5, color: T.accent, letterSpacing: "0.1em", marginBottom: 10 }}>POST AN UPDATE</div>
+        <textarea value={postText} onChange={(e) => setPostText(e.target.value)} placeholder="New exhibit, extended hours, anything worth telling followers…" maxLength={500} style={{ ...inputStyleBase, minHeight: 80, marginBottom: 8 }} />
+        <button onClick={submitPost} disabled={!postText.trim() || posting} className="f-mono" style={{ fontSize: 11, letterSpacing: "0.05em", padding: "9px 16px", background: postText.trim() ? T.accent : T.hair, color: postText.trim() ? "#fff" : T.muted, border: "none", cursor: postText.trim() ? "pointer" : "default" }}>
+          {posting ? "…" : "POST"}
+        </button>
+      </div>
+      <div style={{ marginBottom: 30, borderTop: `1px dashed ${T.hair}`, paddingTop: 24 }}>
+        <div className="f-mono" style={{ fontSize: 10.5, color: T.moss, letterSpacing: "0.1em", marginBottom: 10 }}>ADD AN OFFICIAL PICK</div>
+        <div style={{ display: "grid", gap: 8, marginBottom: 8 }}>
+          <input value={pickWork} onChange={(e) => setPickWork(e.target.value)} placeholder="Work title" style={inputStyleBase} />
+          <input value={pickArtist} onChange={(e) => setPickArtist(e.target.value)} placeholder="Artist" style={inputStyleBase} />
+          <input value={pickNote} onChange={(e) => setPickNote(e.target.value)} placeholder="Note — which gallery/floor, why it matters" style={inputStyleBase} />
+        </div>
+        <button onClick={submitPick} disabled={!pickWork.trim() || pickBusy} className="f-mono" style={{ fontSize: 11, letterSpacing: "0.05em", padding: "9px 16px", background: pickWork.trim() ? T.moss : T.hair, color: "#fff", border: "none", cursor: pickWork.trim() ? "pointer" : "default" }}>
+          {pickBusy ? "…" : "ADD PICK"}
+        </button>
+      </div>
+      <div style={{ borderTop: `1px dashed ${T.hair}`, paddingTop: 20 }}>
+        <div className="f-mono" style={{ fontSize: 10.5, color: T.muted, letterSpacing: "0.1em", marginBottom: 14 }}>{data?.followerCount ?? 0} FOLLOWER{data?.followerCount === 1 ? "" : "S"}</div>
+        {data?.posts?.length > 0 && (
+          <div style={{ marginBottom: 22 }}>
+            <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 6 }}>YOUR RECENT POSTS</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {data.posts.map((p) => <div key={p.id} style={{ fontSize: 13, background: T.card, border: `1px solid ${T.hair}`, padding: "8px 10px" }}>{p.text}</div>)}
+            </div>
+          </div>
+        )}
+        {data?.picks?.length > 0 && (
+          <div>
+            <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 6 }}>YOUR OFFICIAL PICKS</div>
+            <div style={{ display: "grid", gap: 5 }}>
+              {data.picks.map((p) => <div key={p.id} className="f-mono" style={{ fontSize: 10.5, color: T.ink }}><span style={{ color: T.seal }}>✦</span> {p.work} — {p.artist}{p.note ? ` (${p.note})` : ""}</div>)}
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function MuseumsTab({ communityMuseums, onAddCommunity, following, onToggleFollow }) {
   const [query, setQuery] = useState("");
+  const [museumAccounts, setMuseumAccounts] = useState([]);
+  useEffect(() => { api.getMuseumAccounts().then(setMuseumAccounts).catch(() => {}); }, []);
   const combined = useMemo(() => mergeMuseumLists(communityMuseums), [communityMuseums]);
   const cities = useMemo(() => Array.from(new Set(combined.map((c) => c.city))).sort(), [combined]);
   const q = query.trim().toLowerCase();
@@ -1099,7 +1459,7 @@ function MuseumsTab({ communityMuseums, onAddCommunity }) {
       <PlanVisit combined={combined} />
 
       <div style={{ marginTop: 34, marginBottom: 22, borderTop: `1px solid ${T.hair}`, paddingTop: 22 }}>
-        <SectionHeader eyebrow="CURATED + LOCALLY ADDED" title="Browse Museums" blurb="Tap any museum to see must-sees and leave a tip for other travelers — locals recommending spots to visitors, and to each other. Can't find yours? Add it from the log-a-visit form." />
+        <SectionHeader eyebrow="CURATED + LOCALLY ADDED" title="Browse Museums" blurb="Tap any museum to see must-sees, official updates if it's claimed, and to leave a tip for other travelers. Can't find yours? Add it from the log-a-visit form." />
       </div>
       <div style={{ position: "relative", marginBottom: 18, display: "flex", alignItems: "center" }}>
         <Search size={14} color={T.muted} style={{ position: "absolute", left: 10 }} />
@@ -1113,7 +1473,7 @@ function MuseumsTab({ communityMuseums, onAddCommunity }) {
         <EmptyState text="No matches yet — this list only has what's curated or community-added so far." />
       ) : (
         <div style={{ display: "grid", gap: 8 }}>
-          {results.map((m, i) => <MuseumRow key={i} m={m} />)}
+          {results.map((m, i) => <MuseumRow key={i} m={m} museumAccounts={museumAccounts} following={following} onToggleFollow={onToggleFollow} />)}
         </div>
       )}
     </>
@@ -1121,18 +1481,35 @@ function MuseumsTab({ communityMuseums, onAddCommunity }) {
 }
 
 /* ============================= modals ============================= */
-function Lightbox({ work, onClose }) {
+function Lightbox({ work, onClose, onEdit }) {
+  const [shareOpen, setShareOpen] = useState(false);
+  const [sharePhoto, setSharePhoto] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shared, setShared] = useState(false);
+
+  const doShare = async () => {
+    setShareBusy(true);
+    try {
+      await api.postFeed({ kind: "piece", title: work.title, artist: work.artist, medium: work.medium, subject: work.subject, museum: work.museum, imageDataUrl: sharePhoto ? work.imageDataUrl : null });
+      setShared(true); setShareOpen(false);
+    } catch (e) { console.error(e); }
+    setShareBusy(false);
+  };
+
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,18,15,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 60, overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()} className="pat-modal-in" style={{ background: T.card, border: `1px solid ${T.hair}`, boxShadow: "0 30px 80px rgba(0,0,0,0.4)", maxWidth: 560, width: "100%", margin: "auto" }}>
         <div style={{ position: "relative" }}>
           <Frame palette={work.palette || paletteFor(work.id)} imageDataUrl={work.imageDataUrl} mine={work.mine} size="large" />
-          <button onClick={onClose} style={{ position: "absolute", top: 10, right: 10, background: "rgba(0,0,0,0.5)", border: "none", color: "#fff", cursor: "pointer", padding: 6 }}><X size={16} /></button>
+          <div style={{ position: "absolute", top: 10, right: 10, display: "flex", gap: 6 }}>
+            <button onClick={() => onEdit(work)} className="f-mono" style={{ background: "rgba(0,0,0,0.5)", border: "none", color: "#fff", cursor: "pointer", padding: "6px 10px", fontSize: 10, display: "flex", alignItems: "center", gap: 5 }}>EDIT</button>
+            <button onClick={onClose} style={{ background: "rgba(0,0,0,0.5)", border: "none", color: "#fff", cursor: "pointer", padding: 6 }}><X size={16} /></button>
+          </div>
         </div>
         <div style={{ padding: "18px 20px 20px" }}>
-          <div className="f-mono" style={{ fontSize: 10, color: T.muted, marginBottom: 5 }}>{work.acc} · {work.medium || "Medium unknown"}</div>
+          <div className="f-mono" style={{ fontSize: 10, color: T.muted, marginBottom: 5 }}>{[work.acc, work.medium].filter(Boolean).join(" · ")}</div>
           <div className="f-display" style={{ fontSize: 22, color: T.ink, marginBottom: 4 }}>{work.title}</div>
-          <div className="f-body" style={{ fontSize: 14, color: T.muted, marginBottom: 8 }}>{work.mine ? "Taken by you" : (work.artist || "Unknown artist")} · {work.year || "n.d."}</div>
+          <div className="f-body" style={{ fontSize: 14, color: T.muted, marginBottom: 8 }}>{[work.mine ? "Taken by you" : work.artist, work.year].filter(Boolean).join(" · ")}</div>
           {work.museum && <div className="f-body" style={{ fontSize: 12.5, color: T.muted, display: "flex", alignItems: "center", gap: 5, marginBottom: 8 }}><MapPin size={12} /> {work.museum}</div>}
           {(work.emotion || work.pickedColor) && (
             <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 6 }}>
@@ -1140,9 +1517,365 @@ function Lightbox({ work, onClose }) {
               {work.emotion && <span className="f-mono" style={{ fontSize: 11, color: T.muted }}>{work.emotion}</span>}
             </div>
           )}
+          {work.personalMeaning && (
+            <div style={{ marginTop: 12, borderTop: `1px dashed ${T.hair}`, paddingTop: 10 }}>
+              <div className="f-mono" style={{ fontSize: 9, color: T.accent, marginBottom: 6 }}>WHAT THIS MEANS TO YOU</div>
+              <p style={{ fontSize: 13.5, color: T.ink, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{work.personalMeaning}</p>
+            </div>
+          )}
+          {work.reflectionNotes && work.reflectionNotes.length > 0 && (
+            <div style={{ marginTop: 12, borderTop: `1px dashed ${T.hair}`, paddingTop: 10 }}>
+              <div className="f-mono" style={{ fontSize: 9, color: T.horizon, marginBottom: 6 }}>WHAT YOU NOTICED</div>
+              <div style={{ display: "grid", gap: 6 }}>
+                {work.reflectionNotes.map((n, i) => <div key={i} style={{ fontSize: 13, color: T.ink, background: T.paper, padding: "7px 9px" }}>{n}</div>)}
+              </div>
+            </div>
+          )}
+          <div style={{ marginTop: 14, borderTop: `1px dashed ${T.hair}`, paddingTop: 12 }}>
+            {shared ? (
+              <div className="f-mono" style={{ fontSize: 10.5, color: T.moss }}>✓ SHARED TO THE FEED</div>
+            ) : !shareOpen ? (
+              <button onClick={() => setShareOpen(true)} className="f-mono" style={{ fontSize: 10.5, color: T.horizon, background: "none", border: `1px solid ${T.horizon}`, padding: "6px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+                <Share2 size={11} /> SHARE TO FEED
+              </button>
+            ) : (
+              <div>
+                {work.imageDataUrl && (
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11.5, color: T.muted, cursor: "pointer", marginBottom: 8 }}>
+                    <input type="checkbox" checked={sharePhoto} onChange={(e) => setSharePhoto(e.target.checked)} /> Also share the photo — no automated review on shared photos yet
+                  </label>
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={doShare} disabled={shareBusy} className="f-mono" style={{ fontSize: 10.5, color: "#fff", background: T.horizon, border: "none", padding: "6px 11px", cursor: shareBusy ? "default" : "pointer" }}>{shareBusy ? "…" : "CONFIRM SHARE"}</button>
+                  <button onClick={() => setShareOpen(false)} className="f-mono" style={{ fontSize: 10.5, color: T.muted, background: "none", border: `1px solid ${T.hair}`, padding: "6px 11px", cursor: "pointer" }}>CANCEL</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
+  );
+}
+
+function EditWorkModal({ work, onClose, onSave, onDelete, communityMuseums, onAddCommunity }) {
+  const [title, setTitle] = useState(work.title || "");
+  const [artist, setArtist] = useState(work.artist || "");
+  const [year, setYear] = useState(work.year || "");
+  const [medium, setMedium] = useState(work.medium || "");
+  const [museum, setMuseum] = useState(work.museum || "");
+  const [emotion, setEmotion] = useState(work.emotion || "");
+  const [pickedColor, setPickedColor] = useState(work.pickedColor || null);
+  const [personalMeaning, setPersonalMeaning] = useState(work.personalMeaning || "");
+  const [subject, setSubject] = useState(work.subject || "");
+  const [trigger, setTrigger] = useState(work.trigger || "");
+  const [scale, setScale] = useState(work.scale || "");
+  const [saving, setSaving] = useState(false);
+  const colors = work.colors && work.colors.length ? work.colors : (work.pickedColor ? [work.pickedColor] : []);
+
+  const submit = async () => {
+    if (!title.trim()) return;
+    setSaving(true);
+    await onSave({ ...work, title: title.trim(), artist: artist.trim(), year: year.trim(), medium: medium.trim(), museum: museum.trim(), emotion: emotion || null, pickedColor: pickedColor || null, personalMeaning: personalMeaning.trim() || null, subject: subject || null, trigger: trigger || null, scale: scale || null });
+    setSaving(false);
+  };
+
+  return (
+    <ModalShell title="Edit this piece" onClose={onClose}>
+      <div style={{ display: "grid", gap: 12 }}>
+        <div>
+          <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>TITLE</label>
+          <input style={inputStyleBase} value={title} onChange={(e) => setTitle(e.target.value)} />
+        </div>
+        {!work.mine && (
+          <div>
+            <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>ARTIST</label>
+            <input style={inputStyleBase} value={artist} onChange={(e) => setArtist(e.target.value)} />
+          </div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div>
+            <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>YEAR</label>
+            <input style={inputStyleBase} value={year} onChange={(e) => setYear(e.target.value)} />
+          </div>
+          <div>
+            <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>MEDIUM</label>
+            <input style={inputStyleBase} value={medium} onChange={(e) => setMedium(e.target.value)} />
+          </div>
+        </div>
+        <div>
+          <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>MUSEUM</label>
+          <MuseumPicker value={museum} onValueChange={setMuseum} communityMuseums={communityMuseums} onAddCommunity={onAddCommunity} />
+        </div>
+        {colors.length > 0 && (
+          <div>
+            <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>WHICH COLOR PULLED YOU IN?</div>
+            <div style={{ display: "flex", gap: 7 }}>
+              {colors.map((c) => (
+                <button key={c} onClick={() => setPickedColor(pickedColor === c ? null : c)} title={c} style={{ width: 26, height: 26, borderRadius: "50%", background: c, cursor: "pointer", border: pickedColor === c ? `2px solid ${T.ink}` : `1px solid ${T.hair}` }} />
+              ))}
+            </div>
+          </div>
+        )}
+        <div>
+          <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>HOW DID IT MAKE YOU FEEL?</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {EMOTIONS.map((em) => (
+              <button key={em} onClick={() => setEmotion(emotion === em ? "" : em)} className="f-mono" style={{ fontSize: 10, padding: "4px 9px", border: `1px solid ${emotion === em ? T.accent : T.hair}`, background: emotion === em ? T.accent : "transparent", color: emotion === em ? "#fff" : T.ink, cursor: "pointer" }}>{em}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>WHAT KIND OF SUBJECT IS IT?</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {SUBJECTS.map((s) => (
+              <button key={s} onClick={() => setSubject(subject === s ? "" : s)} className="f-mono" style={{ fontSize: 10, padding: "4px 9px", border: `1px solid ${subject === s ? T.moss : T.hair}`, background: subject === s ? T.moss : "transparent", color: subject === s ? "#fff" : T.ink, cursor: "pointer" }}>{s}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>WHAT PULLED YOU IN FIRST?</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {TRIGGERS.map((t) => (
+              <button key={t} onClick={() => setTrigger(trigger === t ? "" : t)} className="f-mono" style={{ fontSize: 10, padding: "4px 9px", border: `1px solid ${trigger === t ? T.horizon : T.hair}`, background: trigger === t ? T.horizon : "transparent", color: trigger === t ? "#fff" : T.ink, cursor: "pointer" }}>{t}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>SCALE, IN PERSON?</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {SCALES.map((s) => (
+              <button key={s} onClick={() => setScale(scale === s ? "" : s)} className="f-mono" style={{ fontSize: 10, padding: "4px 9px", border: `1px solid ${scale === s ? T.seal : T.hair}`, background: scale === s ? T.seal : "transparent", color: scale === s ? "#fff" : T.ink, cursor: "pointer" }}>{s}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <label className="f-mono" style={{ fontSize: 10, color: T.muted, display: "block", marginBottom: 4 }}>WHAT DOES THIS MEAN TO YOU?</label>
+          <textarea value={personalMeaning} onChange={(e) => setPersonalMeaning(e.target.value)} placeholder="Not what it means in general — what it means to you. As long as you need." style={{ ...inputStyleBase, minHeight: 90, resize: "vertical" }} maxLength={2000} />
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+        <button onClick={() => { if (window.confirm("Remove this piece from your gallery and canon? This can't be undone.")) onDelete(work.id); }} className="f-mono" style={{ fontSize: 11, color: T.seal, background: "none", border: `1px solid ${T.seal}`, padding: "10px 14px", cursor: "pointer" }}>DELETE</button>
+        <button disabled={!title.trim() || saving} onClick={submit} className="f-mono" style={{ flex: 1, padding: "10px 0", fontSize: 11.5, letterSpacing: "0.06em", background: title.trim() ? T.accent : T.hair, color: title.trim() ? "#fff" : T.muted, border: "none", cursor: title.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          {saving ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "SAVE CHANGES"}
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ReflectModal({ onClose, onSaveToGallery }) {
+  const [imageDataUrl, setImageDataUrl] = useState(null);
+  const [imgBusy, setImgBusy] = useState(false);
+  const [phase, setPhase] = useState("start"); // start | camera | thinking | prompts | done
+  const [cameraError, setCameraError] = useState("");
+  const [prompts, setPrompts] = useState(null);
+  const [step, setStep] = useState(0);
+  const [notes, setNotes] = useState({});
+  const [revealed, setRevealed] = useState(null);
+  const [revealBusy, setRevealBusy] = useState(false);
+  const [voiceOn, setVoiceOn] = useState(true);
+  const [listening, setListening] = useState(false);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const recRef = useRef(null);
+
+  const speechSupported = typeof window !== "undefined" && !!window.speechSynthesis;
+  const micSupported = typeof window !== "undefined" && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  const stopCamera = () => {
+    if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; }
+  };
+  useEffect(() => () => { stopCamera(); if (window.speechSynthesis) window.speechSynthesis.cancel(); }, []);
+
+  const startCamera = async () => {
+    setCameraError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      setPhase("camera");
+    } catch (e) {
+      setCameraError("Couldn't reach your camera — check this site's camera permission, or upload a photo instead.");
+    }
+  };
+  useEffect(() => {
+    if (phase === "camera" && videoRef.current && streamRef.current) videoRef.current.srcObject = streamRef.current;
+  }, [phase]);
+
+  const processImage = async (dataUrl) => {
+    setImageDataUrl(dataUrl);
+    setPhase("thinking");
+    const result = await aiGuideReflection(dataUrl);
+    setPrompts(result?.prompts?.length ? result.prompts : [
+      "What's the first thing your eye goes to?",
+      "What do you think is happening here?",
+      "What mood does this put you in?",
+      "Is there a detail you almost missed?",
+    ]);
+    setStep(0);
+    setPhase("prompts");
+  };
+
+  const capture = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    const scale = Math.min(1, 640 / video.videoWidth);
+    const w = Math.round(video.videoWidth * scale), h = Math.round(video.videoHeight * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+    stopCamera();
+    processImage(dataUrl);
+  };
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setImgBusy(true);
+    let compressed = null;
+    try { compressed = await compressImage(file); } catch (err) { console.error(err); }
+    setImgBusy(false);
+    if (compressed) processImage(compressed);
+  };
+
+  // Speaks every prompt aloud the moment it appears — this mode is built to work
+  // without reading or typing at all, if you don't want to. A real, live browser
+  // voice generated fresh from the prompt text, not a recording.
+  useEffect(() => {
+    if (phase !== "prompts" || !voiceOn || !speechSupported) return;
+    window.speechSynthesis.cancel();
+    const u = new window.SpeechSynthesisUtterance(prompts[step]);
+    u.rate = 0.95;
+    window.speechSynthesis.speak(u);
+    return () => window.speechSynthesis.cancel();
+  }, [phase, step, voiceOn]);
+
+  const toggleListen = () => {
+    if (!micSupported) return;
+    if (listening) { recRef.current?.stop(); return; }
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new Rec();
+    rec.lang = "en-US";
+    rec.interimResults = false;
+    rec.onresult = (e) => {
+      const text = e.results[0][0].transcript;
+      setNotes((prev) => ({ ...prev, [step]: ((prev[step] || "") + " " + text).trim() }));
+    };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    recRef.current = rec;
+    rec.start();
+    setListening(true);
+  };
+
+  const reveal = async () => {
+    setRevealBusy(true);
+    const result = await aiIdentifyArtwork(imageDataUrl);
+    setRevealBusy(false);
+    setRevealed(result);
+  };
+
+  const saveIt = () => {
+    onSaveToGallery({
+      id: uid(), imageDataUrl, mine: true,
+      title: (revealed && revealed.title) || "A piece you reflected on",
+      artist: (revealed && revealed.artist) || "",
+      year: (revealed && revealed.year) || "",
+      medium: (revealed && revealed.medium) || "Photograph",
+      museum: "",
+      reflectionNotes: Object.values(notes).map((n) => (n || "").trim()).filter(Boolean),
+      acc: `PH.${new Date().getFullYear()}.${String(Math.floor(Math.random() * 9999)).padStart(4, "0")}`,
+    });
+    onClose();
+  };
+
+  const handleClose = () => { stopCamera(); if (window.speechSynthesis) window.speechSynthesis.cancel(); onClose(); };
+
+  return (
+    <ModalShell title="See a piece" onClose={handleClose}>
+      {phase === "start" && (
+        <>
+          <p style={{ fontSize: 12.5, color: T.muted, marginBottom: 14, lineHeight: 1.5 }}>
+            Every art-scanner app races to tell you what you're looking at in half a second. This one does the
+            opposite — point your camera and it'll ask you to actually look, out loud, hands-free if you want.
+          </p>
+          <button onClick={startCamera} className="f-mono" style={{ width: "100%", marginBottom: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, border: `1px solid ${T.horizon}`, background: T.horizon, color: "#fff", padding: "14px 0", fontSize: 12, cursor: "pointer" }}>
+            <Sparkles size={15} /> POINT MY CAMERA AT IT
+          </button>
+          {cameraError && <div className="f-mono" style={{ fontSize: 10.5, color: T.seal, marginBottom: 10 }}>{cameraError}</div>}
+          <label style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, border: `1px dashed ${T.hair}`, padding: "14px 0", cursor: "pointer", color: T.muted, fontSize: 12 }}>
+            {imgBusy ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <ImageIcon size={15} />}
+            {imgBusy ? "Processing…" : "Or upload a photo instead"}
+            <input type="file" accept="image/*" onChange={onFile} style={{ display: "none" }} />
+          </label>
+        </>
+      )}
+      {phase === "camera" && (
+        <div>
+          <div style={{ position: "relative", background: "#000", marginBottom: 12 }}>
+            <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", maxHeight: 320, objectFit: "cover", display: "block" }} />
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => { stopCamera(); setPhase("start"); }} className="f-mono" style={{ fontSize: 11, padding: "12px 16px", border: `1px solid ${T.hair}`, background: "none", color: T.ink, cursor: "pointer" }}>CANCEL</button>
+            <button onClick={capture} className="f-mono" style={{ flex: 1, fontSize: 12, letterSpacing: "0.05em", padding: "12px 0", border: "none", background: T.horizon, color: "#fff", cursor: "pointer" }}>CAPTURE</button>
+          </div>
+        </div>
+      )}
+      {phase === "thinking" && (
+        <div style={{ textAlign: "center", padding: "10px 0" }}>
+          <img src={imageDataUrl} alt="" style={{ maxHeight: 140, margin: "0 auto 14px", display: "block", border: `1px solid ${T.hair}` }} />
+          <Spinner label="Looking closely…" />
+        </div>
+      )}
+      {phase === "prompts" && (
+        <div>
+          <img src={imageDataUrl} alt="" style={{ width: "100%", maxHeight: 170, objectFit: "cover", marginBottom: 14, border: `1px solid ${T.hair}` }} />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+            <div className="f-mono" style={{ fontSize: 9, color: T.muted, letterSpacing: "0.05em" }}>{step + 1} OF {prompts.length}</div>
+            {speechSupported && (
+              <button onClick={() => setVoiceOn((v) => !v)} title={voiceOn ? "Turn voice off" : "Turn voice on"} className="f-mono" style={{ fontSize: 9, color: voiceOn ? T.horizon : T.muted, background: "none", border: `1px solid ${voiceOn ? T.horizon : T.hair}`, padding: "3px 8px", cursor: "pointer" }}>
+                {voiceOn ? "VOICE ON" : "VOICE OFF"}
+              </button>
+            )}
+          </div>
+          <div className="f-display" style={{ fontSize: 17, lineHeight: 1.4, marginBottom: 12, color: T.ink }}>{prompts[step]}</div>
+          <div style={{ position: "relative", marginBottom: 14 }}>
+            <textarea value={notes[step] || ""} onChange={(e) => setNotes({ ...notes, [step]: e.target.value })} placeholder={micSupported ? "Jot a thought, or tap the mic to just say it" : "Jot a thought, if you want — totally optional"} style={{ ...inputStyleBase, minHeight: 60, resize: "vertical", paddingRight: micSupported ? 40 : 10 }} />
+            {micSupported && (
+              <button onClick={toggleListen} title={listening ? "Stop listening" : "Speak your answer"} style={{ position: "absolute", right: 8, top: 8, background: listening ? T.seal : "none", border: `1px solid ${listening ? T.seal : T.hair}`, borderRadius: "50%", width: 26, height: 26, cursor: "pointer", color: listening ? "#fff" : T.muted, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12 }}>
+                ●
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={step === 0} onClick={() => setStep((s) => s - 1)} className="f-mono" style={{ fontSize: 11, padding: "9px 14px", border: `1px solid ${T.hair}`, background: "none", color: T.ink, cursor: step === 0 ? "default" : "pointer", opacity: step === 0 ? 0.4 : 1 }}>BACK</button>
+            {step < prompts.length - 1 ? (
+              <button onClick={() => setStep((s) => s + 1)} className="f-mono" style={{ flex: 1, fontSize: 11, padding: "9px 0", border: "none", background: T.accent, color: "#fff", cursor: "pointer" }}>NEXT</button>
+            ) : (
+              <button onClick={() => setPhase("done")} className="f-mono" style={{ flex: 1, fontSize: 11, padding: "9px 0", border: "none", background: T.accent, color: "#fff", cursor: "pointer" }}>I'M DONE LOOKING</button>
+            )}
+          </div>
+        </div>
+      )}
+      {phase === "done" && (
+        <div>
+          <img src={imageDataUrl} alt="" style={{ width: "100%", maxHeight: 170, objectFit: "cover", marginBottom: 14, border: `1px solid ${T.hair}` }} />
+          {!revealed ? (
+            <button onClick={reveal} disabled={revealBusy} className="f-mono" style={{ width: "100%", marginBottom: 12, fontSize: 11, padding: "10px 0", border: `1px solid ${T.horizon}`, background: "none", color: T.horizon, cursor: revealBusy ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+              {revealBusy ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : "✦"} WANT THE BACKGROUND ON THIS PIECE?
+            </button>
+          ) : (
+            <div style={{ marginBottom: 12, fontSize: 12.5, color: T.ink, background: T.paper, border: `1px dashed ${T.hair}`, padding: "10px 12px" }}>
+              <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 4 }}>{revealed.confidence === "low" ? "NOT CONFIDENTLY IDENTIFIED" : (revealed.title || "").toUpperCase()}</div>
+              {revealed.description}
+            </div>
+          )}
+          <button onClick={saveIt} className="f-mono" style={{ width: "100%", fontSize: 11.5, letterSpacing: "0.06em", padding: "10px 0", border: "none", background: T.accent, color: "#fff", cursor: "pointer" }}>
+            SAVE TO MY GALLERY
+          </button>
+        </div>
+      )}
+    </ModalShell>
   );
 }
 
@@ -1228,6 +1961,11 @@ function AddWorkModal({ onClose, onSave, communityMuseums, onAddCommunity }) {
   const [dominantColors, setDominantColors] = useState([]);
   const [pickedColor, setPickedColor] = useState(null);
   const [emotion, setEmotion] = useState("");
+  const [subject, setSubject] = useState("");
+  const [trigger, setTrigger] = useState("");
+  const [scale, setScale] = useState("");
+  const [shareToFeed, setShareToFeed] = useState(false);
+  const [sharePhoto, setSharePhoto] = useState(false);
 
   const runIdentify = async (imgUrl) => {
     const src = imgUrl || imageDataUrl;
@@ -1274,12 +2012,19 @@ function AddWorkModal({ onClose, onSave, communityMuseums, onAddCommunity }) {
   const submit = async () => {
     if (!title.trim()) return;
     setSaving(true);
-    await onSave({
+    const newWork = {
       id: uid(), title: title.trim(), artist: artist.trim(), year: year.trim(),
       medium: medium.trim() || (mine ? "Photograph" : ""), museum: museum.trim(), mine, imageDataUrl,
       emotion: emotion || null, pickedColor: pickedColor || null, colors: dominantColors,
+      subject: subject || null, trigger: trigger || null, scale: scale || null,
       acc: `${mine ? "PH" : "AC"}.${new Date().getFullYear()}.${String(Math.floor(Math.random() * 9999)).padStart(4, "0")}`,
-    });
+    };
+    await onSave(newWork);
+    if (shareToFeed) {
+      try {
+        await api.postFeed({ kind: "piece", title: newWork.title, artist: newWork.artist, medium: newWork.medium, subject: newWork.subject, museum: newWork.museum, imageDataUrl: sharePhoto ? imageDataUrl : null });
+      } catch (e) { console.error(e); }
+    }
     setSaving(false);
   };
 
@@ -1354,6 +2099,30 @@ function AddWorkModal({ onClose, onSave, communityMuseums, onAddCommunity }) {
               ))}
             </div>
           </div>
+          <div style={{ marginTop: 10 }}>
+            <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>WHAT KIND OF SUBJECT IS IT? (OPTIONAL)</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {SUBJECTS.map((s) => (
+                <button key={s} onClick={() => setSubject(subject === s ? "" : s)} className="f-mono" style={{ fontSize: 10, padding: "4px 9px", border: `1px solid ${subject === s ? T.moss : T.hair}`, background: subject === s ? T.moss : "transparent", color: subject === s ? "#fff" : T.ink, cursor: "pointer" }}>{s}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>WHAT PULLED YOU IN FIRST? (OPTIONAL)</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {TRIGGERS.map((t) => (
+                <button key={t} onClick={() => setTrigger(trigger === t ? "" : t)} className="f-mono" style={{ fontSize: 10, padding: "4px 9px", border: `1px solid ${trigger === t ? T.horizon : T.hair}`, background: trigger === t ? T.horizon : "transparent", color: trigger === t ? "#fff" : T.ink, cursor: "pointer" }}>{t}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <div className="f-mono" style={{ fontSize: 9, color: T.muted, marginBottom: 5 }}>SCALE, IN PERSON? (OPTIONAL)</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {SCALES.map((s) => (
+                <button key={s} onClick={() => setScale(scale === s ? "" : s)} className="f-mono" style={{ fontSize: 10, padding: "4px 9px", border: `1px solid ${scale === s ? T.seal : T.hair}`, background: scale === s ? T.seal : "transparent", color: scale === s ? "#fff" : T.ink, cursor: "pointer" }}>{s}</button>
+              ))}
+            </div>
+          </div>
         </div>
         <div>
           <label className="f-mono" style={{ fontSize: 10, color: T.muted }}>TITLE</label>
@@ -1382,6 +2151,14 @@ function AddWorkModal({ onClose, onSave, communityMuseums, onAddCommunity }) {
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: T.muted, cursor: "pointer" }}>
           <input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} /> This is my own photograph, not an official reproduction
         </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: T.muted, cursor: "pointer" }}>
+          <input type="checkbox" checked={shareToFeed} onChange={(e) => { setShareToFeed(e.target.checked); if (!e.target.checked) setSharePhoto(false); }} /> Share this to the live Feed for everyone using Patinir
+        </label>
+        {shareToFeed && imageDataUrl && (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11.5, color: T.muted, cursor: "pointer", marginLeft: 22 }}>
+            <input type="checkbox" checked={sharePhoto} onChange={(e) => setSharePhoto(e.target.checked)} /> Also share the photo itself — there's no automated review on shared photos yet, so only do this for one you'd be fine with anyone seeing
+          </label>
+        )}
       </div>
       <button disabled={!title.trim() || saving} onClick={submit} className="f-mono" style={{ marginTop: 18, width: "100%", padding: "10px 0", fontSize: 11.5, letterSpacing: "0.06em", background: title.trim() ? T.accent : T.hair, color: title.trim() ? "#fff" : T.muted, border: "none", cursor: title.trim() ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
         {saving ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "ADD TO GALLERY"}
