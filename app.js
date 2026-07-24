@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import {
   MapPin, Star, Plus, Sparkles, ChevronUp, ChevronDown, X,
   Loader2, Share2, Users, RotateCcw, Image as ImageIcon, Flag, Search, MessageSquare, Palette, LogOut,
-} from "https://esm.sh/lucide-react@0.383.0?external=react";
+} from "lucide-react";
 
 /* ============================= API client — talks only to OUR server ============================= */
 /* The browser never talks to Anthropic directly and never sees an API key.
