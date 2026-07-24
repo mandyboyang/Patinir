@@ -45,20 +45,41 @@ async function identifyArtwork(base64Jpeg) {
   ], { json: true });
 }
 
+async function guideReflection(base64Jpeg) {
+  const system = 'You are a museum educator who practices Visual Thinking Strategies: you help people see and process art for themselves, standing right in front of it, instead of being told what it means. Look at the image and write exactly 4 short, open-ended prompts, in a natural order, that build on each other — starting with simple noticing (what draws the eye, composition, what is happening), moving toward feeling and personal connection. NEVER state facts about the artist, title, art history, or "the meaning" — this is the opposite of what you are doing. Do not editorialize or answer your own prompts. Reply with ONLY a JSON object, no markdown fences, no preamble, shaped exactly like: {"prompts":["","","",""]}.';
+  return askClaude(system, [
+    { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64Jpeg } },
+    { type: "text", text: "Write the 4 guided noticing prompts for this piece." },
+  ], { json: true });
+}
+
 async function locateMuseum(lat, lng) {
   const system = 'Given GPS coordinates, identify the city and, only if you are genuinely confident the coordinates sit at or within about 300m of a specific well-known public art museum, name that museum. Reply with ONLY a JSON object: {"city":"","museum":"","confidence":"high|medium|low"}. Leave "museum" blank and use confidence "low" rather than naming a plausible-sounding museum you are not actually sure about.';
   return askClaude(system, `Latitude: ${lat}, Longitude: ${lng}. Identify the location.`, { json: true });
 }
 
 async function curatorNote(canonWorks) {
-  const list = canonWorks.map((w, i) => `${i + 1}. "${w.title}" — ${w.mine ? "a photograph taken by the person themself" : (w.artist || "artist unknown")}, ${w.medium || "medium unknown"}, ${w.year || "date unknown"}, seen at ${w.museum || "an unspecified museum"}${w.emotion ? `, it made them feel: ${w.emotion}` : ""}${w.pickedColor ? `, they were drawn to the color ${w.pickedColor}` : ""}`).join("\n");
-  const system = "You are a perceptive curator writing a short, specific reflection (3-4 sentences) on someone's personal ranked canon of favorite artworks. Notice one real pattern — recurring subjects, moods, palette, lighting or technique, historical period, or a telling absence — rather than defaulting to a generic 'you like [medium]' observation. If emotion or color data is given, weave it in concretely rather than restating it. Write directly to them, second person, warm but not saccharine, no flattery for its own sake. Reply with ONLY the reflection, no preamble, no markdown.";
+  const list = canonWorks.map((w, i) => {
+    const facts = [
+      w.mine ? "a photograph taken by the person themself" : w.artist,
+      w.medium, w.year ? `dated ${w.year}` : null,
+      w.museum ? `seen at ${w.museum}` : null,
+      w.subject ? `subject: ${w.subject}` : null,
+      w.trigger ? `what pulled them in: ${w.trigger}` : null,
+      w.scale ? `scale: ${w.scale}` : null,
+      w.emotion ? `it made them feel: ${w.emotion}` : null,
+      w.pickedColor ? `they were drawn to the color ${w.pickedColor}` : null,
+      w.personalMeaning ? `what it means to them: "${w.personalMeaning}"` : null,
+    ].filter(Boolean);
+    return `${i + 1}. "${w.title}" — ${facts.join(", ")}`;
+  }).join("\n");
+  const system = "You are a perceptive curator writing a short, specific reflection (3-5 sentences) on someone's personal ranked canon of favorite artworks. You have real structured tags to work with — subject matter, what perceptually pulls them in (color vs. composition vs. light vs. story, etc.), preferred scale, era, plus their own written words about what pieces mean to them. Use these as real evidence and name the actual pattern specifically (e.g. 'four of your top five are intimate-scale interiors where light does the work, not story' beats 'you like quiet scenes'). Some pieces will have missing fields simply because the person didn't fill them in — that is not the same as the fact being unknown or absent, so never comment on a field being 'unknown' or 'undocumented'; just work with whatever facts are actually given. If the tags are sparse, say less rather than padding with generic praise. Write directly to them, second person, warm but not saccharine, no flattery for its own sake. Reply with ONLY the reflection, no preamble, no markdown.";
   return askClaude(system, `Here is the ranked canon, most important first:\n${list}\n\nWrite the reflection.`);
 }
 
 async function compareCanons(mine, theirs) {
-  const fmt = (arr) => arr.map((w, i) => `${i + 1}. "${w.title}" — ${w.artist || "unknown"}${w.museum ? `, ${w.museum}` : ""}`).join("\n");
-  const system = "You compare two people's personal art canons and write 2-3 sentences noting one genuine, specific point of overlap or contrast — not generic praise. If there is truly no overlap, say that plainly and describe the contrast instead. Reply with ONLY the comparison, no preamble.";
+  const fmt = (arr) => arr.map((w, i) => `${i + 1}. "${w.title}"${w.artist ? ` — ${w.artist}` : ""}${w.museum ? `, ${w.museum}` : ""}`).join("\n");
+  const system = "You compare two people's personal art canons and write 2-3 sentences noting one genuine, specific point of overlap or contrast — not generic praise. Some entries will be missing an artist or museum simply because that field wasn't filled in; that's not the same as it being unknown, so don't comment on missing fields at all. If there is truly no overlap, say that plainly and describe the contrast instead. Reply with ONLY the comparison, no preamble.";
   return askClaude(system, `Canon A:\n${fmt(mine)}\n\nCanon B:\n${fmt(theirs)}\n\nWrite the comparison.`);
 }
 
@@ -68,4 +89,4 @@ async function planVisit(city, knownMuseums) {
   return askClaude(system, `City: ${city}. Build the plan.`, { json: true });
 }
 
-module.exports = { identifyArtwork, locateMuseum, curatorNote, compareCanons, planVisit };
+module.exports = { identifyArtwork, guideReflection, locateMuseum, curatorNote, compareCanons, planVisit };
